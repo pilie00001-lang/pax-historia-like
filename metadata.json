@@ -1,0 +1,7 @@
+{
+  "name": "Maps Explorer AI",
+  "description": "Explorateur de lieux intelligent alimenté par Gemini avec Google Maps Grounding. Trouvez des restaurants, des parcs et des lieux d'intérêt avec des informations à jour.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
