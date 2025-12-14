@@ -1,252 +1,297 @@
 import React, { useState, useEffect } from 'react';
-import { MessageCircle, Zap, Search, X, ChevronRight, Send, MapPin, AlertTriangle } from 'lucide-react';
+import { MessageCircle, Zap, Search, X, ChevronRight, Send, MapPin, AlertTriangle, Shield, Play, Clock, Menu, Wifi, WifiOff } from 'lucide-react';
 import { Map } from './components/Map';
-import { searchPlaces } from './services/gemini';
-import { Place, Coordinates } from './types';
+import { initializeGame, processTurn } from './services/gemini';
+import { Place, Coordinates, GameState, MapEntity, GameEvent } from './types';
+
+// Composant Modal de Sélection de Pays
+const CountrySelector = ({ onSelect }: { onSelect: (c: string) => void }) => {
+  const countries = [
+    { name: 'France', color: 'bg-blue-600', desc: 'Défense de la démocratie' },
+    { name: 'Allemagne', color: 'bg-gray-800', desc: 'Expansion militaire' },
+    { name: 'Royaume-Uni', color: 'bg-red-700', desc: 'Maîtrise des mers' },
+    { name: 'URSS', color: 'bg-red-900', desc: 'Révolution communiste' },
+    { name: 'USA', color: 'bg-blue-500', desc: 'Arsenal de la démocratie' }
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-900 flex flex-col items-center justify-center p-4">
+      <h1 className="text-4xl font-serif text-white mb-2 tracking-widest uppercase">Pax Historia AI</h1>
+      <p className="text-gray-400 mb-8 italic">Choisissez votre destin - 1936</p>
+      
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full max-w-4xl">
+        {countries.map(c => (
+          <button 
+            key={c.name}
+            onClick={() => onSelect(c.name)}
+            className={`${c.color} group relative overflow-hidden p-6 rounded-lg border-2 border-white/20 hover:border-white transition-all shadow-xl hover:scale-105 text-left`}
+          >
+            <div className="absolute top-0 right-0 p-4 opacity-20 group-hover:opacity-100 transition-opacity">
+               <Shield size={48} className="text-white" />
+            </div>
+            <h3 className="text-2xl font-bold text-white mb-1">{c.name}</h3>
+            <p className="text-white/70 text-sm">{c.desc}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// Composant Top Bar (Temps et Ressources)
+const TopBar = ({ date, onNextTurn, isLoading, isOffline }: { date: string, onNextTurn: () => void, isLoading: boolean, isOffline?: boolean }) => (
+  <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-gray-900 to-transparent z-40 flex items-center justify-between px-6 pt-2">
+    <div className="flex items-center gap-4">
+      <div className="bg-white/90 backdrop-blur text-gray-900 px-4 py-1 rounded shadow-lg border border-gray-400 font-serif font-bold text-lg flex items-center gap-2">
+        <Clock size={18} />
+        {date}
+      </div>
+      
+      {/* Indicateur de Mode IA */}
+      <div className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 shadow-sm border ${isOffline ? 'bg-orange-100 text-orange-700 border-orange-300' : 'bg-green-100 text-green-700 border-green-300'}`}>
+         {isOffline ? <WifiOff size={12} /> : <Wifi size={12} />}
+         {isOffline ? 'IA LOCALE' : 'GEMINI CLOUD'}
+      </div>
+    </div>
+
+    <button 
+      onClick={onNextTurn}
+      disabled={isLoading}
+      className={`
+        flex items-center gap-2 px-6 py-2 rounded shadow-lg border-2 border-yellow-500 font-bold tracking-wider uppercase transition-all
+        ${isLoading ? 'bg-gray-600 text-gray-400 cursor-not-allowed' : 'bg-yellow-500 text-black hover:bg-yellow-400 hover:scale-105'}
+      `}
+    >
+      {isLoading ? 'Calcul stratégique...' : 'Fin du Tour'}
+      <Play size={18} fill="currentColor" />
+    </button>
+  </div>
+);
 
 const App: React.FC = () => {
-  const [places, setPlaces] = useState<Place[]>([]);
-  const [selectedPlaceId, setSelectedPlaceId] = useState<string | undefined>(undefined);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [userLocation, setUserLocation] = useState<Coordinates | undefined>(undefined);
+  // Game State
+  const [gameState, setGameState] = useState<GameState>({
+    date: '...',
+    turn: 0,
+    playerCountry: '',
+    entities: [],
+    events: [],
+    isLoading: false,
+    gameOver: false,
+    isOffline: false
+  });
+
+  const [hasStarted, setHasStarted] = useState(false);
+  const [selectedEntityId, setSelectedEntityId] = useState<string | undefined>(undefined);
   
-  // États de l'interface Pax Historia
+  // UI State
   const [isPanelOpen, setIsPanelOpen] = useState(true);
+  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
   const [mapCenter, setMapCenter] = useState<Coordinates | undefined>(undefined);
-  const [inputQuery, setInputQuery] = useState('');
-  const [showInput, setShowInput] = useState(false);
+  
+  // Actions du joueur pour le tour en cours
+  const [pendingActions, setPendingActions] = useState<string[]>([]);
+  const [chatInput, setChatInput] = useState('');
 
-  // Exemple de données initiales pour le look "Jeu"
-  useEffect(() => {
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const coords = { latitude: position.coords.latitude, longitude: position.coords.longitude };
-        setUserLocation(coords);
-        setMapCenter(coords);
-      }
-    );
-  }, []);
-
-  const handleSearch = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!inputQuery.trim()) return;
-
-    setIsLoading(true);
-    setError(null);
-    
+  // Initialisation du jeu
+  const handleStartGame = async (country: string) => {
+    setGameState(prev => ({ ...prev, isLoading: true, playerCountry: country }));
     try {
-      const results = await searchPlaces(inputQuery, userLocation);
-      setPlaces(prev => [...results, ...prev]);
-      if (results.length > 0) {
-        setMapCenter({ latitude: results[0].latitude, longitude: results[0].longitude });
-        setSelectedPlaceId(results[0].id);
-      }
-      setShowInput(false);
-      setInputQuery('');
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Échec de la communication diplomatique.");
-    } finally {
-      setIsLoading(false);
+      const initData = await initializeGame(country);
+      setGameState(prev => ({
+        ...prev,
+        isLoading: false,
+        date: initData.date,
+        entities: initData.entities,
+        isOffline: initData.isOffline,
+        events: [{
+          id: 'start',
+          date: initData.date,
+          title: 'Début de partie',
+          description: initData.startMessage,
+          sourceCountry: 'Jeu',
+          type: 'info'
+        }]
+      }));
+      setHasStarted(true);
+      // Center map on player capital if found
+      const capital = initData.entities.find(e => e.owner === country && e.type === 'city');
+      if (capital) setMapCenter({ latitude: capital.latitude, longitude: capital.longitude });
+    } catch (e) {
+      console.error(e);
+      setGameState(prev => ({ ...prev, isLoading: false }));
     }
   };
 
-  const handleMarkerClick = (id: string) => {
-    setSelectedPlaceId(id);
+  // Passage du tour
+  const handleNextTurn = async () => {
+    if (gameState.isLoading) return;
+
+    setGameState(prev => ({ ...prev, isLoading: true }));
+    
+    try {
+      // On envoie les actions et le dernier message de chat s'il y en a un
+      const result = await processTurn(gameState, pendingActions, chatInput);
+      
+      setGameState(prev => ({
+        ...prev,
+        isLoading: false,
+        date: result.newDate,
+        turn: prev.turn + 1,
+        entities: result.entities,
+        isOffline: result.isOffline,
+        events: [...result.events, ...prev.events]
+      }));
+      
+      // Reset actions
+      setPendingActions([]);
+      setChatInput('');
+      
+    } catch (e) {
+      console.error(e);
+      setGameState(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  const handleAddAction = (action: string) => {
+    setPendingActions(prev => [...prev, action]);
+    setIsActionMenuOpen(false);
+  };
+
+  const handleEntityClick = (id: string) => {
+    setSelectedEntityId(id);
     setIsPanelOpen(true);
   };
 
-  // Fonction pour générer une couleur basée sur le nom du pays (hash simple)
-  const getCountryColor = (name: string = "") => {
-    const colors = ['bg-red-600', 'bg-blue-600', 'bg-green-600', 'bg-yellow-500', 'bg-purple-600', 'bg-gray-800'];
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) {
-      hash = name.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    return colors[Math.abs(hash) % colors.length];
-  };
+  if (!hasStarted) {
+    return <CountrySelector onSelect={handleStartGame} />;
+  }
+
+  // Conversion des MapEntities en Places pour le composant Map
+  const mapPlaces: Place[] = gameState.entities.map(e => ({
+    ...e,
+    description: e.description || `${e.type} - ${e.owner}`,
+    rating: e.owner, // Hack pour afficher la couleur
+    address: gameState.date // Hack pour afficher la date dans la liste
+  }));
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-gray-900 relative font-sans">
+    <div className="flex h-screen w-full overflow-hidden bg-gray-900 relative font-sans text-gray-900">
       
-      {/* Map Area */}
+      {/* 0. Map Layer */}
       <div className="absolute inset-0 z-0">
         <Map 
-          places={places} 
+          places={mapPlaces} 
           center={mapCenter} 
-          selectedPlaceId={selectedPlaceId}
-          onMarkerClick={handleMarkerClick}
+          selectedPlaceId={selectedEntityId}
+          onMarkerClick={handleEntityClick}
         />
       </div>
 
-      {/* --- PAX HISTORIA UI LAYER --- */}
+      {/* 1. Top Bar */}
+      <TopBar 
+        date={gameState.date} 
+        onNextTurn={handleNextTurn} 
+        isLoading={gameState.isLoading} 
+        isOffline={gameState.isOffline}
+      />
 
-      {/* 1. Panel "Discussions diplomatiques" (Bottom Left) */}
+      {/* 2. Left Panel - Diplomacy & Events */}
       {isPanelOpen && (
-        <div className="absolute bottom-20 left-4 w-[400px] max-w-[90vw] max-h-[70vh] flex flex-col z-20 animate-in slide-in-from-bottom-10 fade-in duration-300">
-          
-          <div className="bg-white rounded-xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
+        <div className="absolute bottom-24 left-4 w-[400px] max-w-[90vw] max-h-[60vh] z-20 flex flex-col animate-in slide-in-from-left-10 duration-300">
+          <div className="bg-[#fcfbf9] rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] border border-gray-300 overflow-hidden flex flex-col h-full relative">
             
-            {/* Header */}
-            <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
-              <h2 className="font-bold text-gray-900 text-lg">Discussions diplomatiques</h2>
-              <button onClick={() => setIsPanelOpen(false)} className="text-gray-400 hover:text-gray-600 transition-colors">
-                <X size={20} />
-              </button>
+            {/* Texture papier */}
+            <div className="absolute inset-0 opacity-10 pointer-events-none bg-[url('https://www.transparenttextures.com/patterns/aged-paper.png')]"></div>
+
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50/80 backdrop-blur z-10">
+              <h2 className="font-serif font-bold text-xl text-gray-800">Rapports & Diplomatie</h2>
+              <button onClick={() => setIsPanelOpen(false)}><X size={20} className="text-gray-500" /></button>
             </div>
 
-            {/* Scrollable Timeline Content */}
-            <div className="overflow-y-auto p-4 custom-scrollbar relative bg-gray-50/50 min-h-[300px]">
-              
-              {/* Vertical Timeline Line */}
-              <div className="absolute left-8 top-0 bottom-0 w-0.5 bg-gray-200 z-0"></div>
-
-              {places.length === 0 && !isLoading && !error && (
-                <div className="text-center py-10 text-gray-500 relative z-10">
-                  <p>Aucune activité diplomatique récente.</p>
-                  <p className="text-sm mt-2">Utilisez le bouton "Nouvelle conversation".</p>
-                </div>
-              )}
-              
-              {isLoading && (
-                 <div className="flex justify-center py-4 relative z-10">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                 </div>
-              )}
-
-              {/* Error Display */}
-              {error && (
-                <div className="relative z-10 mb-4 mx-2 p-3 bg-red-50 border-l-4 border-red-500 rounded shadow-sm flex gap-3 items-start">
-                  <AlertTriangle className="text-red-500 shrink-0 mt-0.5" size={18} />
-                  <div>
-                    <h4 className="font-bold text-red-800 text-sm">Erreur Critique</h4>
-                    <p className="text-xs text-red-700 mt-1">{error}</p>
-                  </div>
+            <div className="overflow-y-auto p-4 flex-grow custom-scrollbar space-y-4 z-10">
+              {/* Liste des actions en attente */}
+              {pendingActions.length > 0 && (
+                <div className="bg-yellow-50 border border-yellow-200 p-3 rounded-lg mb-4">
+                  <h4 className="text-xs font-bold uppercase text-yellow-800 mb-2">Ordres en attente :</h4>
+                  <ul className="list-disc list-inside text-sm text-yellow-900">
+                    {pendingActions.map((act, i) => <li key={i}>{act}</li>)}
+                  </ul>
                 </div>
               )}
 
-              {places.map((place, index) => (
-                <div key={place.id} className="mb-6 relative z-10 group">
-                  {/* Date Separator (Simulated) */}
-                  <div className="flex justify-center mb-4">
-                    <span className="bg-white px-3 py-1 text-xs font-medium text-gray-500 rounded-full border border-gray-200 shadow-sm">
-                      {place.address || "Date inconnue"}
-                    </span>
+              {/* Liste des événements */}
+              {gameState.events.map((evt) => (
+                <div key={evt.id} className="bg-white p-3 rounded shadow-sm border border-gray-100">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wide">{evt.sourceCountry}</span>
+                    <span className="text-[10px] text-gray-400">{evt.date}</span>
                   </div>
-
-                  {/* Card */}
-                  <div 
-                    onClick={() => {
-                        setSelectedPlaceId(place.id);
-                        setMapCenter({ latitude: place.latitude, longitude: place.longitude });
-                    }}
-                    className={`bg-white rounded-xl p-4 shadow-sm border transition-all cursor-pointer hover:shadow-md ${selectedPlaceId === place.id ? 'ring-2 ring-blue-500 border-transparent' : 'border-gray-200'}`}
-                  >
-                    <div className="flex items-start gap-4">
-                      {/* Flags / Icons */}
-                      <div className="flex flex-col -space-y-2 flex-shrink-0 mt-1">
-                        <div className={`w-8 h-8 rounded-full border-2 border-white shadow-sm flex items-center justify-center text-white text-[10px] font-bold ${getCountryColor(place.rating)} z-10`}>
-                          {place.rating ? place.rating.substring(0, 2).toUpperCase() : "??"}
-                        </div>
-                        <div className="w-8 h-8 rounded-full border-2 border-white shadow-sm bg-gray-200 flex items-center justify-center text-gray-600 text-[10px] font-bold z-0">
-                          MOI
-                        </div>
-                      </div>
-
-                      {/* Content */}
-                      <div className="flex-grow min-w-0">
-                        <div className="flex justify-between items-start">
-                           <h3 className="font-bold text-gray-900 text-sm leading-tight mb-1">{place.name}</h3>
-                           <span className="text-[10px] text-gray-400 whitespace-nowrap ml-2">À l'instant</span>
-                        </div>
-                        <p className="text-sm text-gray-600 leading-relaxed font-serif">
-                          {place.description}
-                        </p>
-                      </div>
-
-                      {/* Chevron */}
-                      <div className="flex-shrink-0 self-center text-gray-300">
-                        <ChevronRight size={18} />
-                      </div>
-                    </div>
-                  </div>
+                  <h3 className="font-bold text-gray-800">{evt.title}</h3>
+                  <p className="text-sm text-gray-600 mt-1 font-serif leading-relaxed">{evt.description}</p>
                 </div>
               ))}
             </div>
 
-            {/* Footer Action Button */}
-            {!showInput ? (
-              <div className="p-4 bg-white border-t border-gray-100 sticky bottom-0 z-20">
+            {/* Zone de chat / ordre direct */}
+            <div className="p-3 bg-white border-t border-gray-200 z-10">
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  placeholder="Envoyer un message diplomatique ou un ordre spécial..."
+                  className="flex-grow bg-gray-100 border-none rounded px-3 py-2 text-sm focus:ring-1 focus:ring-gray-400"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                       setPendingActions(prev => [...prev, `Diplomatie/Ordre: ${chatInput}`]);
+                       setChatInput('');
+                    }
+                  }}
+                />
                 <button 
-                  onClick={() => setShowInput(true)}
-                  className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+                  onClick={() => {
+                     if (chatInput.trim()) {
+                       setPendingActions(prev => [...prev, `Diplomatie/Ordre: ${chatInput}`]);
+                       setChatInput('');
+                     }
+                  }}
+                  className="bg-gray-800 text-white p-2 rounded hover:bg-black"
                 >
-                  Démarrer une nouvelle conversation
+                  <Send size={16} />
                 </button>
               </div>
-            ) : (
-              <div className="p-3 bg-white border-t border-gray-100 sticky bottom-0 z-20">
-                <form onSubmit={handleSearch} className="flex gap-2">
-                    <input 
-                      type="text" 
-                      autoFocus
-                      placeholder="Ex: Déclarer la guerre à l'Italie..."
-                      className="flex-grow bg-gray-100 border-none rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      value={inputQuery}
-                      onChange={(e) => setInputQuery(e.target.value)}
-                    />
-                    <button 
-                        type="submit"
-                        className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 transition-colors"
-                    >
-                        <Send size={18} />
-                    </button>
-                </form>
-              </div>
-            )}
-            
+            </div>
           </div>
         </div>
       )}
 
-      {/* 2. Floating Action Buttons (Bottom Left) */}
-      <div className="absolute bottom-4 left-4 flex items-center gap-3 z-30">
-        
-        {/* Main Chat Button (Blue) */}
+      {/* 3. Actions Menu (Lightning Button) */}
+      {isActionMenuOpen && (
+        <div className="absolute bottom-24 left-20 w-64 bg-gray-800 text-white rounded-xl shadow-xl p-2 z-30 animate-in fade-in zoom-in duration-200">
+          <h3 className="text-xs font-bold text-gray-400 uppercase p-2 border-b border-gray-700 mb-2">Ordres Militaires</h3>
+          <button onClick={() => handleAddAction("Déplacer l'armée la plus proche vers la frontière ennemie")} className="w-full text-left p-2 hover:bg-gray-700 rounded text-sm flex items-center gap-2"><MapPin size={14}/> Déployer à la frontière</button>
+          <button onClick={() => handleAddAction("Construire une base fortifiée")} className="w-full text-left p-2 hover:bg-gray-700 rounded text-sm flex items-center gap-2"><Shield size={14}/> Fortifier la position</button>
+          <button onClick={() => handleAddAction("Déclarer la guerre à un voisin")} className="w-full text-left p-2 hover:bg-red-900/50 text-red-200 rounded text-sm flex items-center gap-2"><AlertTriangle size={14}/> Déclaration de guerre</button>
+        </div>
+      )}
+
+      {/* 4. FABs (Bottom Left) */}
+      <div className="absolute bottom-6 left-6 flex items-center gap-4 z-30">
         <button 
           onClick={() => setIsPanelOpen(!isPanelOpen)}
-          className="w-12 h-12 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-xl shadow-lg flex items-center justify-center border-2 border-white/20 transition-all"
-          title="Discussions"
+          className="w-14 h-14 bg-white text-gray-800 rounded-full shadow-lg flex items-center justify-center border border-gray-200 hover:bg-gray-50 transition-all hover:scale-105 active:scale-95"
         >
-          <MessageCircle size={24} fill="currentColor" className="text-white" />
-          {/* Notification dot */}
-          {!isPanelOpen && places.length > 0 && (
-             <span className="absolute top-2 right-2 w-3 h-3 bg-red-500 border-2 border-blue-600 rounded-full"></span>
-          )}
+          <MessageCircle size={24} />
+          {gameState.events.length > 0 && !isPanelOpen && <span className="absolute top-0 right-0 w-4 h-4 bg-red-500 rounded-full border-2 border-white"></span>}
         </button>
 
-        {/* Action/Events Button (Grey/Orange) */}
         <button 
-          className="w-12 h-12 bg-gray-200 hover:bg-gray-300 active:scale-95 text-gray-700 rounded-xl shadow-lg flex items-center justify-center border-2 border-white/50 transition-all"
-          title="Actions"
-          onClick={() => {
-              // Quick action shortcut logic could go here
-              setShowInput(true);
-              setIsPanelOpen(true);
-          }}
+          onClick={() => setIsActionMenuOpen(!isActionMenuOpen)}
+          className={`w-14 h-14 rounded-full shadow-lg flex items-center justify-center border-4 border-white transition-all hover:scale-105 active:scale-95 ${isActionMenuOpen ? 'bg-yellow-500 text-black' : 'bg-gray-800 text-white'}`}
         >
-          <Zap size={24} className="text-orange-500" fill="currentColor" />
+          <Zap size={24} fill={isActionMenuOpen ? "black" : "none"} />
         </button>
-
-        {/* Search Button (White) */}
-        <button 
-          className="w-12 h-12 bg-white hover:bg-gray-50 active:scale-95 text-gray-800 rounded-xl shadow-lg flex items-center justify-center border border-gray-200 transition-all"
-          title="Rechercher sur la carte"
-        >
-          <Search size={22} />
-        </button>
-
       </div>
 
     </div>

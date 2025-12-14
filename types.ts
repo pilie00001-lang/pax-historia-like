@@ -3,15 +3,44 @@ export interface Coordinates {
   longitude: number;
 }
 
-export interface Place {
+export type EntityType = 'city' | 'army' | 'base' | 'battle';
+
+export interface MapEntity {
   id: string;
   name: string;
-  description: string;
+  type: EntityType;
+  owner: string; // Country Name
   latitude: number;
   longitude: number;
-  address?: string;
-  rating?: string;
-  sourceUri?: string; // Optional real Google Maps link if available
+  strength?: number; // Pour les armées
+  description?: string;
+}
+
+export interface GameEvent {
+  id: string;
+  date: string;
+  title: string;
+  description: string;
+  sourceCountry: string; // Qui a causé l'événement
+  type: 'diplomacy' | 'war' | 'construction' | 'info';
+}
+
+export interface GameState {
+  date: string;
+  turn: number;
+  playerCountry: string;
+  entities: MapEntity[];
+  events: GameEvent[];
+  isLoading: boolean;
+  gameOver: boolean;
+  isOffline?: boolean; // Indicateur si on utilise l'IA Locale
+}
+
+// Compatibilité avec l'ancien code (pour la Map)
+export interface Place extends MapEntity {
+  address?: string; // Utilisé pour la date dans l'UI
+  rating?: string; // Utilisé pour le pays dans l'UI
+  sourceUri?: string;
 }
 
 export interface Message {
@@ -20,10 +49,4 @@ export interface Message {
   mapSources?: Place[];
 }
 
-export interface SearchState {
-  isLoading: boolean;
-  places: Place[];
-  error?: string;
-  selectedPlaceId?: string;
-  query: string;
-}
+export type ChatMessage = Message;
