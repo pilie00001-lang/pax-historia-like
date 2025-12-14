@@ -3,7 +3,7 @@ import L from 'leaflet';
 import { MapEntity, Place } from '../types';
 
 interface MapProps {
-  places: Place[]; // On garde le nom "places" pour compatibilité, mais ce sont des MapEntities
+  places: Place[];
   center?: { latitude: number; longitude: number };
   selectedPlaceId?: string;
   onMarkerClick: (placeId: string) => void;
@@ -17,19 +17,19 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
   // Initialize Map
   useEffect(() => {
     if (mapContainerRef.current && !mapInstanceRef.current) {
-      const initialLat = center?.latitude && !isNaN(center.latitude) ? center.latitude : 48.8566;
-      const initialLng = center?.longitude && !isNaN(center.longitude) ? center.longitude : 2.3522;
+      // Fallback sûr pour les coordonnées initiales
+      const safeLat = (center?.latitude && !isNaN(center.latitude)) ? center.latitude : 48.8566;
+      const safeLng = (center?.longitude && !isNaN(center.longitude)) ? center.longitude : 2.3522;
 
       const map = L.map(mapContainerRef.current, {
         minZoom: 3,
-        maxZoom: 10, // Zoom restreint pour effet "Carte d'État-Major"
+        maxZoom: 10,
         zoomControl: false,
         attributionControl: false
-      }).setView([initialLat, initialLng], 5);
+      }).setView([safeLat, safeLng], 5);
       
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // Fond de carte "Papier / Historique" (Esri National Geographic ou similaire)
       L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}', {
         maxZoom: 16
       }).addTo(map);
@@ -40,8 +40,11 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
 
   // Update View Center
   useEffect(() => {
-    if (mapInstanceRef.current && center && typeof center.latitude === 'number' && typeof center.longitude === 'number') {
-        mapInstanceRef.current.flyTo([center.latitude, center.longitude], 6, { duration: 1.5 });
+    if (mapInstanceRef.current && center) {
+        if (typeof center.latitude === 'number' && !isNaN(center.latitude) && 
+            typeof center.longitude === 'number' && !isNaN(center.longitude)) {
+            mapInstanceRef.current.flyTo([center.latitude, center.longitude], 6, { duration: 1.5 });
+        }
     }
   }, [center]);
 
@@ -54,23 +57,25 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
     Object.values(markersRef.current).forEach(marker => marker.remove());
     markersRef.current = {};
 
-    places.forEach((entity: any) => { // Cast as any to access entity specific props if needed
-      // Sécurité : Ignorer les entités sans coordonnées valides pour éviter le crash Leaflet
-      if (typeof entity.latitude !== 'number' || typeof entity.longitude !== 'number') return;
+    places.forEach((entity: any) => {
+      // SÉCURITÉ CRITIQUE : Vérifier que les coordonnées sont des nombres valides (pas NaN, pas undefined)
+      if (typeof entity.latitude !== 'number' || isNaN(entity.latitude) || 
+          typeof entity.longitude !== 'number' || isNaN(entity.longitude)) {
+          return;
+      }
       
       const isSelected = entity.id === selectedPlaceId;
       
-      // Determine Color based on Owner (Simple Hash or logic)
+      // Determine Color
       let colorClass = 'bg-gray-700';
       if (['France', 'USA', 'UK', 'Alliés'].includes(entity.owner)) colorClass = 'bg-blue-600';
       else if (['Allemagne', 'Italie', 'Japon', 'Axe'].includes(entity.owner)) colorClass = 'bg-red-700';
       else if (['URSS', 'Soviétiques'].includes(entity.owner)) colorClass = 'bg-red-900';
-      else colorClass = 'bg-yellow-600'; // Neutre
+      else colorClass = 'bg-yellow-600';
 
-      // Icon Shape based on Type
+      // Icon Shape
       let iconHtml = '';
       if (entity.type === 'army') {
-        // NATO Style Unit Symbol (Rectangle)
         iconHtml = `
           <div class="relative group cursor-pointer">
             <div class="w-8 h-6 ${colorClass} border-2 border-white shadow-md flex items-center justify-center transform transition-transform hover:scale-110 ${isSelected ? 'ring-2 ring-yellow-400 scale-110' : ''}">
@@ -82,7 +87,6 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
           </div>
         `;
       } else if (entity.type === 'base') {
-        // Triangle for Base
         iconHtml = `
           <div class="relative group cursor-pointer">
              <div class="w-0 h-0 border-l-[10px] border-l-transparent border-r-[10px] border-r-transparent border-b-[20px] border-b-${colorClass.replace('bg-', '')} filter drop-shadow-md ${isSelected ? 'scale-125' : ''}"></div>
@@ -92,7 +96,6 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
           </div>
         `;
       } else {
-        // Circle for Cities (Default)
         iconHtml = `
           <div class="relative group flex flex-col items-center justify-center">
             <div class="w-4 h-4 ${colorClass} border-2 border-white rounded-full shadow-md ${isSelected ? 'ring-4 ring-white/50 scale-125' : ''}"></div>

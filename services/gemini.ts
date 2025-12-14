@@ -1,224 +1,230 @@
-import { GameState, MapEntity, GameEvent } from "../types";
+import { GameState, MapEntity, GameEvent, DiplomaticThread, DiplomaticMessage } from "../types";
 
 // Note: On utilise window.puter qui est chargé via le script dans index.html
-// On retire l'import de @google/genai car on passe sur Puter (gratuit)
-
-const MODEL_ID = 'gpt-4o-mini'; // Puter utilise souvent des alias comme gpt-4o-mini ou gpt-3.5-turbo
+const MODEL_ID = 'gpt-4o-mini';
 
 // --- UTILS ---
-// Nettoyer la réponse de l'IA (souvent entourée de ```json ... ```)
 const cleanJson = (text: string): string => {
-  let cleaned = text.trim();
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '');
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```/, '').replace(/```$/, '');
-  }
-  return cleaned;
-};
+  if (!text) return "{}";
+  let cleaned = text;
 
-// --- LOCAL AI ENGINE (FALLBACK) ---
-// Gardé au cas où Puter est lent ou down
-const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-  return Math.sqrt(Math.pow(lat2 - lat1, 2) + Math.pow(lon2 - lon1, 2));
-};
-
-const runLocalSimulation = (currentState: GameState): { entities: MapEntity[], events: GameEvent[], newDate: string } => {
-  const newEntities = currentState.entities.map(e => ({ ...e }));
-  const events: GameEvent[] = [];
-  const MOVEMENT_SPEED = 0.5;
-  
-  newEntities.forEach(entity => {
-    if (entity.type === 'army') {
-      let target: MapEntity | null = null;
-      let minDist = Infinity;
-
-      newEntities.forEach(other => {
-        if (other.type === 'city' && other.owner !== entity.owner) {
-          const dist = calculateDistance(entity.latitude, entity.longitude, other.latitude, other.longitude);
-          if (dist < minDist) {
-            minDist = dist;
-            target = other;
-          }
-        }
-      });
-
-      if (target) {
-        const t = target as MapEntity;
-        const angle = Math.atan2(t.latitude - entity.latitude, t.longitude - entity.longitude);
-        entity.latitude += Math.sin(angle) * MOVEMENT_SPEED;
-        entity.longitude += Math.cos(angle) * MOVEMENT_SPEED;
-
-        if (minDist < 0.8) {
-           t.owner = entity.owner;
-           events.push({
-             id: `battle-${Date.now()}-${t.id}`,
-             date: "Simulation",
-             title: `Chute de ${t.name}`,
-             description: `Les forces de ${entity.owner} ont capturé ${t.name} !`,
-             sourceCountry: entity.owner,
-             type: 'war'
-           });
-        }
-      }
-    }
-  });
-
-  const months = ["Jan", "Fev", "Mar", "Avr", "Mai", "Juin", "Juil", "Aou", "Sep", "Oct", "Nov", "Dec"];
-  const currentMonthParts = currentState.date.split(' ');
-  let nextDate = currentState.date;
-  
-  if (currentMonthParts.length >= 2) {
-    const currentMonthIndex = months.findIndex(m => currentMonthParts[1].startsWith(m));
-    if (currentMonthIndex !== -1) {
-        const nextIndex = (currentMonthIndex + 1) % 12;
-        const year = parseInt(currentMonthParts[2] || "1936") + (nextIndex === 0 ? 1 : 0);
-        nextDate = `1 ${months[nextIndex]} ${year}`;
-    }
-  } else {
-      nextDate = "Tour Suivant";
+  // 1. Si Markdown code block, on essaie de nettoyer
+  if (cleaned.includes('```json')) {
+    cleaned = cleaned.replace(/```json/g, '').replace(/```/g, '');
+  } else if (cleaned.includes('```')) {
+    cleaned = cleaned.replace(/```/g, '');
   }
 
-  return {
-    entities: newEntities,
-    events: events.length > 0 ? events : [{
-        id: `move-${Date.now()}`,
-        date: nextDate,
-        title: "Manœuvres Stratégiques",
-        description: "Les armées se repositionnent sur le front.",
-        sourceCountry: "Renseignement",
-        type: 'info'
-    }],
-    newDate: nextDate
-  };
+  // 2. EXTRACTION BRUTE : On cherche le premier '{' et le dernier '}'
+  // C'est la méthode la plus robuste contre le "blabla" de l'IA
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+
+  if (firstBrace !== -1 && lastBrace !== -1) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+
+  return cleaned.trim();
 };
 
-// --- API FUNCTIONS (VIA PUTER.JS) ---
+export const loginToPuter = async () => {
+  if (window.puter) {
+    try {
+      await window.puter.auth.signIn();
+      return true;
+    } catch (e) {
+      console.error("Puter Login Failed", e);
+      return false;
+    }
+  }
+  return false;
+};
+
+// --- API FUNCTIONS ---
 
 export const initializeGame = async (playerCountry: string): Promise<{ entities: MapEntity[], date: string, startMessage: string, isOffline: boolean }> => {
   try {
     if (!window.puter) throw new Error("Puter.js not loaded");
 
     const prompt = `
-      Tu es un moteur de jeu de stratégie historique.
-      Initialise une partie en 1936 pour le pays : ${playerCountry}.
+      Tu es le moteur du jeu "Pax Historia". Initialise une carte en 1936.
+      Joueur : ${playerCountry}.
       
-      Génère un JSON valide avec cette structure EXACTE :
+      Génère un JSON valide (SANS TEXTE AUTOUR) :
       {
         "date": "1 Jan 1936",
-        "message": "Texte d'ambiance...",
+        "message": "Contexte historique...",
         "entities": [
-           { "id": "1", "name": "Ville", "type": "city", "owner": "Pays", "latitude": 48.85, "longitude": 2.35, "description": "Desc" },
-           { "id": "2", "name": "Armée", "type": "army", "owner": "Pays", "latitude": 49.0, "longitude": 2.5, "strength": 100 }
+           { "id": "city-1", "name": "Paris", "type": "city", "owner": "France", "latitude": 48.85, "longitude": 2.35, "description": "Capitale" },
+           { "id": "army-1", "name": "1ère Armée", "type": "army", "owner": "France", "latitude": 49.0, "longitude": 4.0, "strength": 100 },
+           { "id": "city-2", "name": "Berlin", "type": "city", "owner": "Allemagne", "latitude": 52.52, "longitude": 13.40 },
+           { "id": "army-2", "name": "Wehrmacht A", "type": "army", "owner": "Allemagne", "latitude": 51.0, "longitude": 12.0, "strength": 120 }
         ]
       }
-      Génère au moins 5 villes majeures en Europe et 3 armées.
-      IMPORTANT : Retourne UNIQUEMENT le JSON, sans markdown, sans explications.
+      Important: Ajoute au moins 8 villes clés en Europe/Asie et 6 armées.
     `;
 
-    // Appel à Puter AI
     const response = await window.puter.ai.chat(prompt, { model: MODEL_ID });
     
-    // Puter renvoie parfois un objet { message: { content: "..." } } ou direct le texte selon la version
+    if (response && (response.status === 401 || response.error)) throw new Error("Puter Unauthorized");
+
     const textContent = typeof response === 'string' ? response : (response?.message?.content || JSON.stringify(response));
-    const cleanText = cleanJson(textContent);
-    
-    const data = JSON.parse(cleanText);
+    const data = JSON.parse(cleanJson(textContent));
 
     return {
       entities: data.entities || [],
       date: data.date || "1 Janvier 1936",
-      startMessage: data.message || "L'Europe retient son souffle...",
+      startMessage: data.message || "L'histoire est en marche...",
       isOffline: false
     };
   } catch (e: any) {
-    console.warn("Puter AI Error, switching to Local Simulation:", e);
-    // Fallback Mock data
+    console.warn("Init Error (Fallback):", e);
+    
+    // FALLBACK DATA
     const mockEntities: MapEntity[] = [
         { id: 'city-paris', name: 'Paris', type: 'city', owner: 'France', latitude: 48.8566, longitude: 2.3522 },
         { id: 'city-berlin', name: 'Berlin', type: 'city', owner: 'Allemagne', latitude: 52.5200, longitude: 13.4050 },
+        { id: 'city-moscow', name: 'Moscou', type: 'city', owner: 'URSS', latitude: 55.7558, longitude: 37.6173 },
+        { id: 'city-tokyo', name: 'Tokyo', type: 'city', owner: 'Japon', latitude: 35.6762, longitude: 139.6503 },
         { id: 'city-london', name: 'Londres', type: 'city', owner: 'Royaume-Uni', latitude: 51.5074, longitude: -0.1278 },
-        { id: 'army-fr', name: 'Armée du Nord', type: 'army', owner: 'France', latitude: 49.5, longitude: 3.0, strength: 100 },
-        { id: 'army-de', name: 'Panzer I', type: 'army', owner: 'Allemagne', latitude: 51.0, longitude: 10.0, strength: 100 }
+        { id: 'city-rome', name: 'Rome', type: 'city', owner: 'Italie', latitude: 41.9028, longitude: 12.4964 },
+        { id: 'army-fr-1', name: 'Armée des Alpes', type: 'army', owner: 'France', latitude: 46.0, longitude: 6.0, strength: 100 },
+        { id: 'army-de-1', name: 'Panzer Group', type: 'army', owner: 'Allemagne', latitude: 50.0, longitude: 10.0, strength: 120 }
     ];
 
     return {
       entities: mockEntities,
       date: "1 Janvier 1936",
-      startMessage: "⚠ Connexion IA instable. Mode Simulation Locale activé.",
+      startMessage: "Mode Hors Ligne / Simulation (Erreur IA détectée).",
       isOffline: true
     };
   }
 };
 
 export const processTurn = async (
-  currentState: GameState,
-  playerActions: string[],
-  userMessage?: string
-): Promise<{ entities: MapEntity[], events: GameEvent[], newDate: string, isOffline: boolean }> => {
+  currentState: GameState
+): Promise<{ 
+  entities: MapEntity[], 
+  events: GameEvent[], 
+  newDate: string, 
+  updatedDiplomacy: DiplomaticThread[],
+  isOffline: boolean 
+}> => {
   try {
     if (!window.puter) throw new Error("Puter.js not loaded");
 
+    // Préparation du contexte pour l'IA
+    const diplomacyContext = currentState.diplomacy.map(thread => {
+      const recentMessages = thread.messages.slice(-4); 
+      return `Conversation avec [${thread.participants.join(', ')}]: ${JSON.stringify(recentMessages)}`;
+    }).join('\n');
+
+    const actionsContext = currentState.plannedActions.map(a => a.text).join(', ');
+
     const context = `
-      Jeu de stratégie.
-      Date actuelle: ${currentState.date}.
-      Pays Joueur: ${currentState.playerCountry}.
-      Actions du joueur: ${JSON.stringify(playerActions)}.
-      Message diplomatique: "${userMessage || ""}".
+      Jeu Pax Historia. 
+      Date: ${currentState.date}. Joueur: ${currentState.playerCountry}.
       
-      Liste actuelle des entités (simplifiée):
-      ${JSON.stringify(currentState.entities.map(e => ({id: e.id, name: e.name, type: e.type, owner: e.owner, lat: e.latitude, lon: e.longitude})))}
+      ACTIONS DU JOUEUR CE TOUR :
+      ${actionsContext || "Aucune action spécifique, maintenir les positions."}
+
+      DIPLOMATIE (Derniers échanges) :
+      ${diplomacyContext}
+      
+      ENTITÉS ACTUELLES (Positions) :
+      ${JSON.stringify(currentState.entities.map(e => ({id: e.id, type: e.type, owner: e.owner, lat: e.latitude, lon: e.longitude})))}
     `;
 
     const prompt = `
-      Simule le passage d'un mois (tour suivant).
-      1. Bouge les armées (les armées ennemies avancent vers les villes du joueur).
-      2. Résous les combats si une armée est sur une ville ennemie (distance < 0.5).
-      3. Génère des événements.
-
-      Retourne UNIQUEMENT un JSON valide :
+      Simule le mois suivant.
+      
+      1. MOUVEMENTS & COMBATS : Déplace les armées. Si une armée arrive sur une ville ennemie, change le propriétaire.
+      2. DIPLOMATIE : Réponds aux questions du joueur si nécessaire.
+      
+      Retourne JSON UNIQUEMENT :
       {
         "newDate": "Mois Suivant 1936",
         "events": [ { "title": "...", "description": "...", "sourceCountry": "...", "type": "war" } ],
-        "updatedEntities": [ 
-           // Liste COMPLÈTE ou PARTIELLE des entités avec leurs nouvelles positions/propriétaires.
-           // IMPORTANT: Renvoie latitude/longitude valides (nombres).
+        "updatedEntities": [ { "id": "...", "latitude": 0.0, "longitude": 0.0, "owner": "..." } ],
+        "diplomaticResponses": [
+           { "participants": ["Allemagne"], "response": "Nous acceptons votre offre." }
         ]
       }
     `;
 
     const response = await window.puter.ai.chat(context + "\n" + prompt, { model: MODEL_ID });
     
-    const textContent = typeof response === 'string' ? response : (response?.message?.content || JSON.stringify(response));
-    const cleanText = cleanJson(textContent);
-    const data = JSON.parse(cleanText);
-
-    // Merge strategy: If AI returns partial list, merge. If complete, replace.
-    // Pour simplifier ici, on suppose que l'IA renvoie les entités modifiées.
-    let mergedEntities = [...currentState.entities];
+    if (response && (response.status === 401 || response.error)) throw new Error("Puter Unauthorized");
     
-    if (data.updatedEntities && Array.isArray(data.updatedEntities)) {
-       // Update logic
+    const textContent = typeof response === 'string' ? response : (response?.message?.content || JSON.stringify(response));
+    const data = JSON.parse(cleanJson(textContent));
+
+    // Mise à jour des entités
+    let mergedEntities = [...currentState.entities];
+    if (data.updatedEntities) {
        data.updatedEntities.forEach((update: MapEntity) => {
+          if (typeof update.latitude !== 'number' || typeof update.longitude !== 'number') return;
           const index = mergedEntities.findIndex(e => e.id === update.id);
           if (index !== -1) {
              mergedEntities[index] = { ...mergedEntities[index], ...update };
           } else {
-             mergedEntities.push(update); // New entity spawn
+             mergedEntities.push(update);
           }
        });
+    }
+
+    // Mise à jour de la diplomatie (Ajout des réponses de l'IA)
+    let updatedDiplomacy = [...currentState.diplomacy];
+    if (data.diplomaticResponses) {
+      data.diplomaticResponses.forEach((resp: any) => {
+        const targetParticipants = resp.participants.sort().join(',');
+        let threadIndex = updatedDiplomacy.findIndex(t => t.participants.sort().join(',') === targetParticipants);
+        
+        if (threadIndex === -1) {
+             threadIndex = updatedDiplomacy.findIndex(t => t.participants.some(p => resp.participants.includes(p)));
+        }
+
+        if (threadIndex !== -1) {
+          updatedDiplomacy[threadIndex].messages.push({
+            id: `msg-${Date.now()}`,
+            sender: resp.participants[0],
+            content: resp.response,
+            timestamp: Date.now()
+          });
+          updatedDiplomacy[threadIndex].unreadCount += 1;
+        } else {
+           updatedDiplomacy.push({
+             id: `thread-${Date.now()}`,
+             participants: resp.participants,
+             messages: [{
+                id: `msg-${Date.now()}`,
+                sender: resp.participants[0],
+                content: resp.response,
+                timestamp: Date.now()
+             }],
+             lastUpdated: Date.now(),
+             unreadCount: 1
+           });
+        }
+      });
     }
 
     return {
       entities: mergedEntities,
       events: (data.events || []).map((e: any, i: number) => ({...e, id: `evt-${Date.now()}-${i}`, date: data.newDate})),
       newDate: data.newDate || currentState.date,
+      updatedDiplomacy,
       isOffline: false
     };
 
   } catch (e) {
-    console.warn("Turn Process failed (Puter), running Local Simulation.", e);
-    const simResult = runLocalSimulation(currentState);
-    return { ...simResult, isOffline: true };
+    console.warn("Turn Process failed (Puter), local fallback", e);
+    return {
+        entities: currentState.entities,
+        events: [{id: 'err', date: currentState.date, title: "Rapport manquant", description: "Problème de communication avec le QG (Erreur IA).", sourceCountry: "QG", type: "info"}],
+        newDate: currentState.date,
+        updatedDiplomacy: currentState.diplomacy,
+        isOffline: true
+    };
   }
 };

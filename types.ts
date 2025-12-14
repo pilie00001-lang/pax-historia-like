@@ -25,21 +25,45 @@ export interface GameEvent {
   type: 'diplomacy' | 'war' | 'construction' | 'info';
 }
 
+// Nouvelle structure pour les messages diplomatiques
+export interface DiplomaticMessage {
+  id: string;
+  sender: string; // 'Player' ou Nom du pays
+  content: string;
+  timestamp: number;
+}
+
+// Une conversation peut impliquer plusieurs pays
+export interface DiplomaticThread {
+  id: string;
+  participants: string[]; // Liste des pays (ex: ['Allemagne', 'Italie'])
+  messages: DiplomaticMessage[];
+  lastUpdated: number;
+  unreadCount: number;
+}
+
+export interface PlayerAction {
+  id: string;
+  text: string;
+}
+
 export interface GameState {
   date: string;
   turn: number;
   playerCountry: string;
   entities: MapEntity[];
   events: GameEvent[];
+  diplomacy: DiplomaticThread[]; // Liste des conversations actives
+  plannedActions: PlayerAction[]; // Liste des ordres pour le tour
   isLoading: boolean;
   gameOver: boolean;
-  isOffline?: boolean; // Indicateur si on utilise l'IA Locale
+  isOffline?: boolean;
 }
 
 // Compatibilité avec l'ancien code (pour la Map)
 export interface Place extends MapEntity {
-  address?: string; // Utilisé pour la date dans l'UI
-  rating?: string; // Utilisé pour le pays dans l'UI
+  address?: string;
+  rating?: string;
   sourceUri?: string;
 }
 
@@ -49,9 +73,6 @@ export interface Message {
   mapSources?: Place[];
 }
 
-export type ChatMessage = Message;
-
-// Déclaration pour Puter.js
 declare global {
   interface Window {
     puter: any;
