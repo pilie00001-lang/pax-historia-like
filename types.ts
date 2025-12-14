@@ -50,3 +50,10 @@ export interface Message {
 }
 
 export type ChatMessage = Message;
+
+// Déclaration pour Puter.js
+declare global {
+  interface Window {
+    puter: any;
+  }
+}

@@ -17,8 +17,8 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
   // Initialize Map
   useEffect(() => {
     if (mapContainerRef.current && !mapInstanceRef.current) {
-      const initialLat = center?.latitude || 48.8566;
-      const initialLng = center?.longitude || 2.3522;
+      const initialLat = center?.latitude && !isNaN(center.latitude) ? center.latitude : 48.8566;
+      const initialLng = center?.longitude && !isNaN(center.longitude) ? center.longitude : 2.3522;
 
       const map = L.map(mapContainerRef.current, {
         minZoom: 3,
@@ -40,7 +40,7 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
 
   // Update View Center
   useEffect(() => {
-    if (mapInstanceRef.current && center) {
+    if (mapInstanceRef.current && center && typeof center.latitude === 'number' && typeof center.longitude === 'number') {
         mapInstanceRef.current.flyTo([center.latitude, center.longitude], 6, { duration: 1.5 });
     }
   }, [center]);
@@ -55,6 +55,9 @@ export const Map: React.FC<MapProps> = ({ places, center, selectedPlaceId, onMar
     markersRef.current = {};
 
     places.forEach((entity: any) => { // Cast as any to access entity specific props if needed
+      // Sécurité : Ignorer les entités sans coordonnées valides pour éviter le crash Leaflet
+      if (typeof entity.latitude !== 'number' || typeof entity.longitude !== 'number') return;
+      
       const isSelected = entity.id === selectedPlaceId;
       
       // Determine Color based on Owner (Simple Hash or logic)
